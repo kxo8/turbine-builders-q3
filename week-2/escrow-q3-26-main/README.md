@@ -60,7 +60,9 @@ Tests run against [LiteSVM](https://github.com/LiteSVM/litesvm) (an in-process S
 cargo test -p escrowq32026
 ```
 
-`escrow-proof.png` in this directory is a screenshot of a full passing test run (all 3 tests green).
+Screenshot of a full passing test run (all 3 tests green):
+
+![Passing test run](escrow-proof.png)
 
 ## Requirements
 

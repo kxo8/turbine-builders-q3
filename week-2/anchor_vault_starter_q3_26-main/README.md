@@ -45,7 +45,9 @@ programs/q3_26_vault/src/
 cargo test -p q3_26_vault
 ```
 
-`vault-proof.png` in this directory is a screenshot of the passing test run.
+Screenshot of the passing test run:
+
+![Passing test run](vault-proof.png)
 
 ## Requirements
 
