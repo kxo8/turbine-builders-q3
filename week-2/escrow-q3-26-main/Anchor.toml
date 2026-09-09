@@ -1,5 +1,3 @@
-skip_local_validator = true
-
 [toolchain]
 
 [features]
@@ -7,7 +5,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-escrowq32026 = "5Y6HMSgNYbkcBiQCukYvTK56aQarSpq1Nk9aiSsjws2o"
+escrowq32026 = "Gp1uxyixK9wdj4bBGhN6Xar6iFWYs9dEShGjjwz4D4Ck"
 
 [provider]
 cluster = "localnet"

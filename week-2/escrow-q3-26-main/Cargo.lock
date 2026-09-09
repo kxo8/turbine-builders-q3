@@ -1238,6 +1238,7 @@ dependencies = [
  "anchor-spl",
  "litesvm",
  "litesvm-token",
+ "solana-clock",
  "solana-keypair",
  "solana-message",
  "solana-pubkey 4.3.0",
