@@ -1,0 +1,18 @@
+[toolchain]
+package_manager = "yarn"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+remittance_stablecoin = "ApagpE9wV8WPwbu7nzBUeYeSJwN1AwE7TJhGZ8Dhbqky"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "cargo test --locked"
+
+[hooks]
