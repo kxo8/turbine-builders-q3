@@ -11,7 +11,7 @@ pub use constants::*;
 pub use instructions::*;
 pub use state::*;
 
-declare_id!("FkP21JjeMc9gcq9iBQBHfLocaLsxCYGLg4jgwin6pBwG");
+declare_id!("CWbeg69j7yMXJ697RLMmXu11T7fRLEbtdxwHX2f1yfQS");
 
 #[program]
 pub mod anchor_core_staking {
@@ -36,5 +36,9 @@ pub mod anchor_core_staking {
     pub fn unstake(ctx: Context<Unstake>) -> Result<()> {
         unstake::handler(ctx)
     }
+    
+    pub fn claim_rewards(ctx: Context<ClaimRewards>) -> Result<()> {
+          claim_rewards::handler(ctx)
+      }
 
 }

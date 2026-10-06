@@ -1,14 +1,20 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { AnchorCoreStaking } from "../target/types/anchor_core_staking";
-import { SystemProgram } from "@solana/web3.js";
-import { MPL_CORE_PROGRAM_ID } from "@metaplex-foundation/mpl-core";
-import { ASSOCIATED_TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 
+import { ComputeBudgetProgram, SystemProgram, SYSVAR_CLOCK_PUBKEY } from "@solana/web3.js";
+
+import {
+  MPL_CORE_PROGRAM_ID,
+  deserializeAssetV1,
+} from "@metaplex-foundation/mpl-core";
+import { publicKey, lamports } from "@metaplex-foundation/umi";
+import { ASSOCIATED_TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { assert } from "chai";
 const MILLISECONDS_PER_DAY = 86400000;
 const REWARDS_BPS = 10000;
 const FREEZE_PERIOD_IN_DAYS = 7;
-const TIME_TRAVEL_IN_DAYS = 8;
+const TIME_TRAVEL_IN_DAYS = 5;
 
 describe("anchor-core-staking", () => {
   // Configure the client to use the local cluster.
@@ -160,16 +166,285 @@ describe("anchor-core-staking", () => {
     }
   });
 
+ 
+  it("Claim rewards while keeping the NFT staked and frozen", async () => {
+    const assetBeforeInfo = await provider.connection.getAccountInfo(
+      nftKeypair.publicKey,
+      "confirmed"
+    );
+    assert.isNotNull(assetBeforeInfo);
+  
+    const assetBefore = deserializeAssetV1({
+      publicKey: publicKey(nftKeypair.publicKey.toBase58()),
+      owner: publicKey(assetBeforeInfo!.owner.toBase58()),
+      lamports: lamports(assetBeforeInfo!.lamports),
+      executable: assetBeforeInfo!.executable,
+      data: assetBeforeInfo!.data,
+    });
+  
+    const attributesBefore = assetBefore.attributes?.attributeList ?? [];
+    const stakedAtBefore = attributesBefore.find(
+      (attribute) => attribute.key === "staked_at"
+    )?.value;
+    const checkpointBefore = attributesBefore.find(
+      (attribute) => attribute.key === "last_claimed_at"
+    )?.value;
+  
+    assert.isDefined(stakedAtBefore);
+    assert.isDefined(checkpointBefore);
+    assert.equal(
+      attributesBefore.find((attribute) => attribute.key === "staked")?.value,
+      "true"
+    );
+    assert.isTrue(assetBefore.freezeDelegate?.frozen);
+  
+    // Advance three days from the current on-chain clock.
+    const clock = await provider.connection.getAccountInfo(
+      SYSVAR_CLOCK_PUBKEY,
+      "confirmed"
+    );
+    assert.isNotNull(clock);
+  
+    const chainTimestamp = Number(clock!.data.readBigInt64LE(32));
+  
+    await advanceTime({
+      absoluteTimestamp:
+        chainTimestamp * 1000 + 3 * MILLISECONDS_PER_DAY,
+    });
+  
+    const userRewardsAta = getAssociatedTokenAddressSync(
+      rewardsMint,
+      provider.wallet.publicKey,
+      false,
+      TOKEN_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
+  
+    const ataBefore = await provider.connection.getAccountInfo(
+      userRewardsAta,
+      "confirmed"
+    );
+  
+    const balanceBefore = ataBefore
+      ? Number(
+          (
+            await provider.connection.getTokenAccountBalance(
+              userRewardsAta,
+              "confirmed"
+            )
+          ).value.amount
+        )
+      : 0;
+  
+    await program.methods
+      .claimRewards()
+      .accountsPartial({
+        owner: provider.wallet.publicKey,
+        config,
+        asset: nftKeypair.publicKey,
+        collection: collectionKeypair.publicKey,
+        updateAuthority,
+        rewardsMint,
+        userRewardsAta,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+        mplCoreProgram: MPL_CORE_PROGRAM_ID,
+      })
+      .rpc({ commitment: "confirmed" });
+  
+    const balanceAfter = Number(
+      (
+        await provider.connection.getTokenAccountBalance(
+          userRewardsAta,
+          "confirmed"
+        )
+      ).value.amount
+    );
+  
+    // REWARDS_BPS = 10,000 and decimals = 6:
+    // three days earn 3,000,000 base units, or three tokens.
+    assert.equal(balanceAfter - balanceBefore, 3_000_000);
+  
+    const assetAfterInfo = await provider.connection.getAccountInfo(
+      nftKeypair.publicKey,
+      "confirmed"
+    );
+    assert.isNotNull(assetAfterInfo);
+  
+    const assetAfter = deserializeAssetV1({
+      publicKey: publicKey(nftKeypair.publicKey.toBase58()),
+      owner: publicKey(assetAfterInfo!.owner.toBase58()),
+      lamports: lamports(assetAfterInfo!.lamports),
+      executable: assetAfterInfo!.executable,
+      data: assetAfterInfo!.data,
+    });
+  
+    const attributesAfter = assetAfter.attributes?.attributeList ?? [];
+    const getAttribute = (key: string) =>
+      attributesAfter.find((attribute) => attribute.key === key)?.value;
+  
+    // Claiming preserves ownership, staking status, and the freeze.
+    assert.equal(
+      assetAfter.owner.toString(),
+      provider.wallet.publicKey.toBase58()
+    );
+    assert.equal(getAttribute("staked"), "true");
+    assert.isTrue(assetAfter.freezeDelegate?.frozen);
+  
+    // Preserve the original staking time.
+    assert.equal(getAttribute("staked_at"), stakedAtBefore);
+  
+    // Advance the reward checkpoint by exactly three paid days.
+    assert.equal(
+      getAttribute("last_claimed_at"),
+      String(Number(checkpointBefore!) + 3 * 86_400)
+    );
+  });
+  it("An immediate second claim pays no additional rewards", async () => {
+    const userRewardsAta = getAssociatedTokenAddressSync(
+      rewardsMint,
+      provider.wallet.publicKey,
+      false,
+      TOKEN_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
+  
+    async function readAsset() {
+      const info = await provider.connection.getAccountInfo(
+        nftKeypair.publicKey,
+        "confirmed"
+      );
+      assert.isNotNull(info);
+  
+      return deserializeAssetV1({
+        publicKey: publicKey(nftKeypair.publicKey.toBase58()),
+        owner: publicKey(info!.owner.toBase58()),
+        lamports: lamports(info!.lamports),
+        executable: info!.executable,
+        data: info!.data,
+      });
+    }
+  
+    const assetBefore = await readAsset();
+    const checkpointBefore = assetBefore.attributes?.attributeList.find(
+      (attribute) => attribute.key === "last_claimed_at"
+    )?.value;
+    assert.isDefined(checkpointBefore);
+  
+    const balanceBefore = (
+      await provider.connection.getTokenAccountBalance(
+        userRewardsAta,
+        "confirmed"
+      )
+    ).value.amount;
+  
+    await program.methods
+      .claimRewards()
+      .accountsPartial({
+        owner: provider.wallet.publicKey,
+        config,
+        asset: nftKeypair.publicKey,
+        collection: collectionKeypair.publicKey,
+        updateAuthority,
+        rewardsMint,
+        userRewardsAta,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+        mplCoreProgram: MPL_CORE_PROGRAM_ID,
+      })
+      // Make this transaction distinct from the first claim,
+      // even if both use the same recent blockhash.
+      .preInstructions([
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 250_000 }),
+      ])
+      .rpc({ commitment: "confirmed" });
+  
+    const balanceAfter = (
+      await provider.connection.getTokenAccountBalance(
+        userRewardsAta,
+        "confirmed"
+      )
+    ).value.amount;
+  
+    const assetAfter = await readAsset();
+    const getAttribute = (key: string) =>
+      assetAfter.attributes?.attributeList.find(
+        (attribute) => attribute.key === key
+      )?.value;
+  
+    assert.equal(balanceAfter, balanceBefore);
+    assert.equal(getAttribute("last_claimed_at"), checkpointBefore);
+    assert.equal(getAttribute("staked_at"), assetBefore.attributes?.attributeList.find(
+      (attribute) => attribute.key === "staked_at"
+    )?.value);
+    assert.equal(getAttribute("staked"), "true");
+    assert.isTrue(assetAfter.freezeDelegate?.frozen);
+  });
   it("Time travel to the future", async () => {
-    // Advance time in milliseconds
-    const currentTimestamp = Date.now();
-    await advanceTime({ absoluteTimestamp: currentTimestamp + TIME_TRAVEL_IN_DAYS * MILLISECONDS_PER_DAY });
-    console.log("\nTime traveled in days", TIME_TRAVEL_IN_DAYS)
+    const clockBefore = await provider.connection.getAccountInfo(
+      SYSVAR_CLOCK_PUBKEY,
+      "confirmed"
+    );
+  
+    if (!clockBefore) {
+      throw new Error("Clock sysvar not found");
+    }
+  
+    // The Clock account stores unix_timestamp at byte offset 32.
+    // Its value is in seconds.
+    const chainTimestamp = Number(
+      clockBefore.data.readBigInt64LE(32)
+    );
+  
+    // Surfpool's absoluteTimestamp expects milliseconds.
+    const targetTimestamp =
+      chainTimestamp * 1000 +
+      TIME_TRAVEL_IN_DAYS * MILLISECONDS_PER_DAY;
+  
+    await advanceTime({
+      absoluteTimestamp: targetTimestamp,
+    });
+  
+    const clockAfter = await provider.connection.getAccountInfo(
+      SYSVAR_CLOCK_PUBKEY,
+      "confirmed"
+    );
+  
+    if (!clockAfter) {
+      throw new Error("Clock sysvar not found after time travel");
+    }
+  
+    const updatedTimestamp = Number(
+      clockAfter.data.readBigInt64LE(32)
+    );
+  
+    if (updatedTimestamp < targetTimestamp / 1000) {
+      throw new Error("On-chain clock did not reach the requested time");
+    }
+  
+    console.log(
+      "On-chain days advanced:",
+      (updatedTimestamp - chainTimestamp) / 86_400
+    );
   });
 
+  
   it("Unstake an NFT", async () => {
     // Get the user rewards ATA account
     const userRewardsAta = getAssociatedTokenAddressSync(rewardsMint, provider.wallet.publicKey, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID);
+    const balanceBefore = Number(
+      (
+        await provider.connection.getTokenAccountBalance(
+          userRewardsAta,
+          "confirmed"
+        )
+      ).value.amount
+    );
+    
+    assert.equal(balanceBefore, 3_000_000);
+    
     const tx = await program.methods.unstake()
     .accountsPartial({
       owner: provider.wallet.publicKey,
@@ -184,8 +459,27 @@ describe("anchor-core-staking", () => {
       tokenProgram: TOKEN_PROGRAM_ID,
       associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
     })
-    .rpc();
+      .rpc();
+
+    const balanceAfter = Number(
+      (
+        await provider.connection.getTokenAccountBalance(
+          userRewardsAta,
+          "confirmed"
+        )
+      ).value.amount
+    );
+    
+    // Unstake pays only the five days since the claim checkpoint.
+    assert.equal(balanceAfter - balanceBefore, 5_000_000);
+    
+    // Three tokens claimed earlier + five paid now.
+    assert.equal(balanceAfter, 8_000_000);
     console.log("\nYour transaction signature", tx);
     console.log("User rewards balance", (await provider.connection.getTokenAccountBalance(userRewardsAta)).value.uiAmount);
   });
+
+
 });
+
+

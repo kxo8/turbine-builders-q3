@@ -73,30 +73,75 @@ pub fn handler(ctx: Context<Unstake>) -> Result<()> {
 
     let attributes = attributes_fetched.unwrap();
 
-    // Prepare the Attributes list to update based on the existing attributes
-    let mut attributes_list: Vec<Attribute> = Vec::with_capacity(attributes.attribute_list.len());
-
-    // Additional auxiliary variables
+    let staking_status = attributes
+        .attribute_list
+        .iter()
+        .find(|attribute| attribute.key == "staked")
+        .ok_or(ErrorCode::AssetNotStaked)?;
+    
+    require!(
+        staking_status.value == "true",
+        ErrorCode::AssetNotStaked
+    );
+    
+    let staked_at = attributes
+        .attribute_list
+        .iter()
+        .find(|attribute| attribute.key == "staked_at")
+        .ok_or(ErrorCode::InvalidTimestamp)?
+        .value
+        .parse::<i64>()
+        .map_err(|_| ErrorCode::InvalidTimestamp)?;
+    
+    let last_claimed_at = match attributes
+        .attribute_list
+        .iter()
+        .find(|attribute| attribute.key == "last_claimed_at")
+    {
+        Some(attribute) => attribute
+            .value
+            .parse::<i64>()
+            .map_err(|_| ErrorCode::InvalidTimestamp)?,
+        None => staked_at,
+    };
+    
     let current_timestamp = Clock::get()?.unix_timestamp;
-    let mut staked_timestamp: i64 = 0;
-    let mut staked_time: i64 = 0;
-
-    for attribute in &attributes.attribute_list {
-        if attribute.key == "staked" {
-            require!(attribute.value == "true", ErrorCode::AssetNotStaked);
-        }
-        else if attribute.key == "staked_at" {
-            staked_timestamp = staked_timestamp.checked_add(attribute.value.parse::<i64>().map_err(|_| ErrorCode::InvalidTimestamp)?).ok_or(ErrorCode::InvalidTimestamp)?;
-            // Calculate the time (in seconds) since the asset was staked
-            staked_time = current_timestamp.checked_sub(staked_timestamp).ok_or(ErrorCode::InvalidTimestamp)?;
-            // Staked time in days
-            staked_time = staked_time.checked_div(SECONDS_PER_DAY).ok_or(ErrorCode::InvalidTimestamp)?;
-            require!(staked_time >= ctx.accounts.config.freeze_period as i64, ErrorCode::FreezePeriodNotElapsed);
-        }
-        else {
-            attributes_list.push(attribute.clone());
-        }
-    }
+    
+    require!(
+        staked_at >= 0
+            && last_claimed_at >= staked_at
+            && current_timestamp >= last_claimed_at,
+        ErrorCode::InvalidTimestamp
+    );
+    
+    // The minimum staking duration still uses the original start time.
+    let total_staked_days = current_timestamp
+        .checked_sub(staked_at)
+        .ok_or(ErrorCode::InvalidTimestamp)?
+        / SECONDS_PER_DAY;
+    
+    require!(
+        total_staked_days >= ctx.accounts.config.freeze_period as i64,
+        ErrorCode::FreezePeriodNotElapsed
+    );
+    
+    // Rewards use only the time that has not been paid yet.
+    let unpaid_days = current_timestamp
+        .checked_sub(last_claimed_at)
+        .ok_or(ErrorCode::InvalidTimestamp)?
+        / SECONDS_PER_DAY;
+    
+    // Preserve unrelated attributes; replace the staking fields below.
+    let mut attributes_list: Vec<Attribute> = attributes
+        .attribute_list
+        .iter()
+        .filter(|attribute| {
+            attribute.key != "staked"
+                && attribute.key != "staked_at"
+                && attribute.key != "last_claimed_at"
+        })
+        .cloned()
+        .collect();
 
     // Prepare signing seeds for the update authority
     let collection_key = ctx.accounts.collection.key();
@@ -115,6 +160,11 @@ pub fn handler(ctx: Context<Unstake>) -> Result<()> {
     });
     attributes_list.push(Attribute {
         key: "staked_at".to_string(),
+        value: "0".to_string(),
+    });
+
+    attributes_list.push(Attribute {
+        key: "last_claimed_at".to_string(),
         value: "0".to_string(),
     });
 
@@ -140,14 +190,27 @@ pub fn handler(ctx: Context<Unstake>) -> Result<()> {
     // Finally, we want to mint rewards to the user
 
     // Calculate the amount
-    let amount =(staked_time as u64)
-        .checked_mul(ctx.accounts.config.rewards_bps as u64)
-        .ok_or(ErrorCode::InvalidRewardsBps)?
-        .checked_mul(10u64.pow(ctx.accounts.rewards_mint.decimals as u32))
-        .ok_or(ErrorCode::InvalidRewardsBps)?
-        .checked_div(10000u64)
-        .ok_or(ErrorCode::InvalidRewardsBps)?;
+    // let amount =(staked_time as u64)
+    //     .checked_mul(ctx.accounts.config.rewards_bps as u64)
+    //     .ok_or(ErrorCode::InvalidRewardsBps)?
+    //     .checked_mul(10u64.pow(ctx.accounts.rewards_mint.decimals as u32))
+    //     .ok_or(ErrorCode::InvalidRewardsBps)?
+    //     .checked_div(10000u64)
+    //     .ok_or(ErrorCode::InvalidRewardsBps)?;
 
+    let unpaid_days = u64::try_from(unpaid_days)
+        .map_err(|_| ErrorCode::InvalidTimestamp)?;
+    
+    let token_scale = 10u64
+        .checked_pow(ctx.accounts.rewards_mint.decimals as u32)
+        .ok_or(ErrorCode::InvalidRewardsBps)?;
+    
+    let amount = unpaid_days
+        .checked_mul(ctx.accounts.config.rewards_bps as u64)
+        .and_then(|value| value.checked_mul(token_scale))
+        .and_then(|value| value.checked_div(10_000))
+        .ok_or(ErrorCode::InvalidRewardsBps)?;
+    
     // Prepare signer seeds for config PDA
     let config_seeds = &[
         b"config",

@@ -7,7 +7,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-anchor_core_staking = "FkP21JjeMc9gcq9iBQBHfLocaLsxCYGLg4jgwin6pBwG"
+anchor_core_staking = "CWbeg69j7yMXJ697RLMmXu11T7fRLEbtdxwHX2f1yfQS"
 
 [registry]
 url = "https://api.apr.dev"
