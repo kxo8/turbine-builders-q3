@@ -20,6 +20,11 @@ use mpl_core::{
 use crate::error::ErrorCode;
 use crate::state::Config;
 
+use super::update_total_staked::{
+    update_total_staked,
+    StakedCountChange,
+};
+
 const SECONDS_PER_DAY: i64 = 86_400;
 const BURN_BONUS_TOKENS: u64 = 100;
 #[derive(Accounts)]
@@ -259,6 +264,16 @@ pub fn handler(ctx: Context<BurnStakedNft>) -> Result<()> {
         ),
         amount,
         ctx.accounts.rewards_mint.decimals,
+    )?;
+
+    update_total_staked(
+        &ctx.accounts.collection.to_account_info(),
+        &ctx.accounts.update_authority.to_account_info(),
+        &ctx.accounts.owner.to_account_info(),
+        &ctx.accounts.system_program.to_account_info(),
+        &ctx.accounts.mpl_core_program.to_account_info(),
+        &[update_authority_seeds],
+        StakedCountChange::Decrement,
     )?;
     
     Ok(())

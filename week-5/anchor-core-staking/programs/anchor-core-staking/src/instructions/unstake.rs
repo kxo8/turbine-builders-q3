@@ -10,6 +10,11 @@ use mpl_core::{
 use crate::Config;
 use crate::error::ErrorCode;
 
+use super::update_total_staked::{
+    update_total_staked,
+    StakedCountChange,
+};
+
 const SECONDS_PER_DAY: i64 = 86400;
 
 #[derive(Accounts)]
@@ -233,5 +238,14 @@ pub fn handler(ctx: Context<Unstake>) -> Result<()> {
         ctx.accounts.rewards_mint.decimals,
     )?;
 
+    update_total_staked(
+        &ctx.accounts.collection.to_account_info(),
+        &ctx.accounts.update_authority.to_account_info(),
+        &ctx.accounts.owner.to_account_info(),
+        &ctx.accounts.system_program.to_account_info(),
+        &ctx.accounts.mpl_core_program.to_account_info(),
+        &[signer_seeds],
+        StakedCountChange::Decrement,
+    )?;
     Ok(())
 }

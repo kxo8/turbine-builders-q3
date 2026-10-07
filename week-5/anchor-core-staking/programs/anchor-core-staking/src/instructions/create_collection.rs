@@ -1,7 +1,12 @@
 use anchor_lang::prelude::*;
+
 use mpl_core::{
     ID as MPL_CORE_ID,
     instructions::CreateCollectionV2CpiBuilder,
+    types::{
+        Attribute, Attributes, Plugin, PluginAuthority,
+        PluginAuthorityPair,
+    },
 };
 
 #[derive(Accounts)]
@@ -37,6 +42,15 @@ pub fn handler(ctx: Context<CreateCollection>, name: String, uri: String) -> Res
     .system_program(&ctx.accounts.system_program.to_account_info())
     .name(name)
     .uri(uri)
+    .plugins(vec![PluginAuthorityPair {
+        plugin: Plugin::Attributes(Attributes {
+            attribute_list: vec![Attribute {
+                key: "total_staked".to_string(),
+                value: "0".to_string(),
+            }],
+        }),
+        authority: Some(PluginAuthority::UpdateAuthority),
+    }])
     .invoke_signed(&[signer_seeds])?;
 
     Ok(())

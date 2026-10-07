@@ -9,6 +9,11 @@ use mpl_core::{
 use crate::state::Config;
 use crate::error::ErrorCode;
 
+use super::update_total_staked::{
+    update_total_staked,
+    StakedCountChange,
+};
+
 #[derive(Accounts)]
 pub struct Stake<'info> {
     #[account(mut)]
@@ -128,6 +133,16 @@ pub fn handler(ctx: Context<Stake>) -> Result<()> {
     .plugin(Plugin::FreezeDelegate(FreezeDelegate { frozen: true }))
     .init_authority(PluginAuthority::UpdateAuthority)
     .invoke()?;
+
+    update_total_staked(
+        &ctx.accounts.collection.to_account_info(),
+        &ctx.accounts.update_authority.to_account_info(),
+        &ctx.accounts.owner.to_account_info(),
+        &ctx.accounts.system_program.to_account_info(),
+        &ctx.accounts.mpl_core_program.to_account_info(),
+        &[signer_seeds],
+        StakedCountChange::Increment,
+    )?;
 
     Ok(())
 }
