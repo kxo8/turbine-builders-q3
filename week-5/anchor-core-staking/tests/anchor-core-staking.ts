@@ -2,7 +2,12 @@ import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { AnchorCoreStaking } from "../target/types/anchor_core_staking";
 
-import { ComputeBudgetProgram, SystemProgram, SYSVAR_CLOCK_PUBKEY } from "@solana/web3.js";
+import {
+  ComputeBudgetProgram,
+  SendTransactionError,
+  SystemProgram,
+  SYSVAR_CLOCK_PUBKEY,
+} from "@solana/web3.js";
 
 import {
   MPL_CORE_PROGRAM_ID,
@@ -34,6 +39,8 @@ describe("anchor-core-staking", () => {
 
   // Generate a keypair for the nft asset
   const nftKeypair = anchor.web3.Keypair.generate();
+
+  const burnNftKeypair = anchor.web3.Keypair.generate();
 
   // Find the config account (PDA)
   const config = anchor.web3.PublicKey.findProgramAddressSync(
@@ -479,6 +486,289 @@ describe("anchor-core-staking", () => {
     console.log("User rewards balance", (await provider.connection.getTokenAccountBalance(userRewardsAta)).value.uiAmount);
   });
 
+  it("Create and stake a separate NFT for burning", async () => {
+    await program.methods
+      .mintAsset(
+        "Burn Test NFT",
+        "https://example.com/burn-test-nft.json"
+      )
+      .accountsPartial({
+        user: provider.wallet.publicKey,
+        asset: burnNftKeypair.publicKey,
+        collection: collectionKeypair.publicKey,
+        updateAuthority,
+        systemProgram: SystemProgram.programId,
+        mplCoreProgram: MPL_CORE_PROGRAM_ID,
+      })
+      .signers([burnNftKeypair])
+      .rpc({ commitment: "confirmed" });
+  
+    await program.methods
+      .stake()
+      .accountsPartial({
+        owner: provider.wallet.publicKey,
+        config,
+        asset: burnNftKeypair.publicKey,
+        collection: collectionKeypair.publicKey,
+        updateAuthority,
+        systemProgram: SystemProgram.programId,
+        mplCoreProgram: MPL_CORE_PROGRAM_ID,
+      })
+      .rpc({ commitment: "confirmed" });
+  
+    const info = await provider.connection.getAccountInfo(
+      burnNftKeypair.publicKey,
+      "confirmed"
+    );
+    assert.isNotNull(info);
+  
+    const asset = deserializeAssetV1({
+      publicKey: publicKey(burnNftKeypair.publicKey.toBase58()),
+      owner: publicKey(info!.owner.toBase58()),
+      lamports: lamports(info!.lamports),
+      executable: info!.executable,
+      data: info!.data,
+    });
+  
+    const stakingStatus = asset.attributes?.attributeList.find(
+      (attribute) => attribute.key === "staked"
+    )?.value;
+  
+    assert.equal(stakingStatus, "true");
+    assert.isTrue(asset.freezeDelegate?.frozen);
+  });
+  it("Reject burning before the freeze period without changing state", async () => {
+    const userRewardsAta = getAssociatedTokenAddressSync(
+      rewardsMint,
+      provider.wallet.publicKey,
+      false,
+      TOKEN_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
+  
+    const assetBefore = await provider.connection.getAccountInfo(
+      burnNftKeypair.publicKey,
+      "confirmed"
+    );
+    assert.isNotNull(assetBefore);
+  
+    // The earlier claim tests already created this ATA.
+    const balanceBefore = (
+      await provider.connection.getTokenAccountBalance(
+        userRewardsAta,
+        "confirmed"
+      )
+    ).value.amount;
+  
+    try {
+      await program.methods
+        .burnStakedNft()
+        .accountsPartial({
+          owner: provider.wallet.publicKey,
+          config,
+          asset: burnNftKeypair.publicKey,
+          collection: collectionKeypair.publicKey,
+          updateAuthority,
+          rewardsMint,
+          userRewardsAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+          mplCoreProgram: MPL_CORE_PROGRAM_ID,
+        })
+        .rpc({ commitment: "confirmed" });
+  
+      assert.fail("Burn should fail before the minimum staking period");
+    } catch (error) {
+      if (!(error instanceof anchor.AnchorError)) {
+        throw error;
+      }
+  
+      assert.equal(
+        error.error.errorCode.code,
+        "FreezePeriodNotElapsed"
+      );
+    }
+  
+    const assetAfter = await provider.connection.getAccountInfo(
+      burnNftKeypair.publicKey,
+      "confirmed"
+    );
+    assert.isNotNull(assetAfter);
+  
+    // All NFT data, including staking attributes and freeze state,
+    // must remain unchanged.
+    assert.isTrue(assetAfter!.data.equals(assetBefore!.data));
+    assert.equal(
+      assetAfter!.owner.toBase58(),
+      assetBefore!.owner.toBase58()
+    );
+  
+    const balanceAfter = (
+      await provider.connection.getTokenAccountBalance(
+        userRewardsAta,
+        "confirmed"
+      )
+    ).value.amount;
+  
+    assert.equal(balanceAfter, balanceBefore);
+  });
+
+  it("Burn a staked NFT and receive unpaid rewards plus the bonus", async () => {
+    // Advance eight days from the current on-chain clock.
+    const clock = await provider.connection.getAccountInfo(
+      SYSVAR_CLOCK_PUBKEY,
+      "confirmed"
+    );
+    assert.isNotNull(clock);
+  
+    const chainTimestamp = Number(clock!.data.readBigInt64LE(32));
+  
+    await advanceTime({
+      absoluteTimestamp:
+        chainTimestamp * 1000 + 8 * MILLISECONDS_PER_DAY,
+    });
+  
+    const userRewardsAta = getAssociatedTokenAddressSync(
+      rewardsMint,
+      provider.wallet.publicKey,
+      false,
+      TOKEN_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
+  
+    const balanceBefore = Number(
+      (
+        await provider.connection.getTokenAccountBalance(
+          userRewardsAta,
+          "confirmed"
+        )
+      ).value.amount
+    );
+  
+    const tx = await program.methods
+      .burnStakedNft()
+      .accountsPartial({
+        owner: provider.wallet.publicKey,
+        config,
+        asset: burnNftKeypair.publicKey,
+        collection: collectionKeypair.publicKey,
+        updateAuthority,
+        rewardsMint,
+        userRewardsAta,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+        mplCoreProgram: MPL_CORE_PROGRAM_ID,
+      })
+      .rpc({ commitment: "confirmed" });
+  
+    const balanceAfter = Number(
+      (
+        await provider.connection.getTokenAccountBalance(
+          userRewardsAta,
+          "confirmed"
+        )
+      ).value.amount
+    );
+  
+    // Eight unpaid days at one token per day, plus a 100-token bonus.
+    assert.equal(balanceAfter - balanceBefore, 108_000_000);
+  
+    const burnedAccount = await provider.connection.getAccountInfo(
+      burnNftKeypair.publicKey,
+      "confirmed"
+    );
+  
+    // Core may retain an Uninitialized tombstone instead of removing
+    // the account. It must no longer contain a live NFT.
+    if (burnedAccount !== null) {
+      assert.equal(burnedAccount.data.length, 1);
+      assert.equal(burnedAccount.data[0], 0);
+    }
+  
+    console.log("Burn transaction:", tx);
+    console.log(
+      "Tokens received:",
+      (balanceAfter - balanceBefore) / 1_000_000
+    );
+  });
+
+  it("Reject a second burn without paying another bonus", async () => {
+    const userRewardsAta = getAssociatedTokenAddressSync(
+      rewardsMint,
+      provider.wallet.publicKey,
+      false,
+      TOKEN_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
+  
+    const balanceBefore = (
+      await provider.connection.getTokenAccountBalance(
+        userRewardsAta,
+        "confirmed"
+      )
+    ).value.amount;
+  
+    let rejected = false;
+  
+    try {
+      await program.methods
+        .burnStakedNft()
+        .accountsPartial({
+          owner: provider.wallet.publicKey,
+          config,
+          asset: burnNftKeypair.publicKey,
+          collection: collectionKeypair.publicKey,
+          updateAuthority,
+          rewardsMint,
+          userRewardsAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+          mplCoreProgram: MPL_CORE_PROGRAM_ID,
+        })
+        // Distinguish this transaction from the first burn,
+        // even if the recent blockhash is unchanged.
+        .preInstructions([
+          ComputeBudgetProgram.setComputeUnitLimit({ units: 250_000 }),
+        ])
+        .rpc({ commitment: "confirmed" });
+    }  catch (error) {
+      if (error instanceof anchor.AnchorError) {
+        assert.equal(error.error.origin, "asset");
+      } else if (error instanceof SendTransactionError) {
+        const logs =
+          error.logs ?? await error.getLogs(provider.connection);
+    
+        const failedOnBurnedAsset = logs.some(
+          (line) =>
+            line.includes("ProgramError caused by account: asset") &&
+            line.includes('BorshIoError("Unexpected length of input")')
+        );
+    
+        assert.isTrue(
+          failedOnBurnedAsset,
+          "Expected rejection while deserializing the burned asset"
+        );
+      } else {
+        throw error;
+      }
+    
+      rejected = true;
+    }
+  
+    assert.isTrue(rejected, "A burned NFT must not be accepted again");
+  
+    const balanceAfter = (
+      await provider.connection.getTokenAccountBalance(
+        userRewardsAta,
+        "confirmed"
+      )
+    ).value.amount;
+  
+    assert.equal(balanceAfter, balanceBefore);
+  });
 
 });
 
